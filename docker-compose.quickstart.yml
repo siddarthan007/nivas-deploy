@@ -1,0 +1,162 @@
+# ============================================================
+# Nivas PMS — Quick Start (pre-built image, no repo clone needed)
+#
+# Usage:
+#   1. Download this file and .env.docker.example
+#   2. cp .env.docker.example .env.docker
+#   3. Edit .env.docker — set passwords, JWT secret, MINIO_PUBLIC_URL
+#   4. docker compose -f docker-compose.quickstart.yml --env-file .env.docker up -d
+#
+# That's it. The app will be at http://localhost (port 80).
+# ============================================================
+
+name: nivas
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=80
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-nivas_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - nivas-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-nivas_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    restart: always
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - nivas-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-08T15-41-24Z
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    networks:
+      - nivas-net
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Pre-built all-in-one image from GitHub Container Registry
+  # nginx (port 80) + backend (port 3000 internal) in one container
+  platform:
+    image: ghcr.io/siddarthan007/nivas-pms:latest
+    restart: always
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-warn}
+      ENABLE_SWAGGER: ${ENABLE_SWAGGER:-false}
+      DB_POOL_MAX: ${DB_POOL_MAX:-8}
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nivas_db}
+      DATABASE_DIRECT_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nivas_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      JWT_EXPIRY: ${JWT_EXPIRY:-7d}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost,exp://*}
+      UPLOAD_DIR: public/uploads
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-10485760}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-admin@nivaspms.com}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:?set SUPER_ADMIN_PASSWORD}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Administrator}
+      SUPER_ADMIN_PHONE: ${SUPER_ADMIN_PHONE:-}
+      GUEST_PORTAL_URL: ${GUEST_PORTAL_URL:-http://localhost}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      CBMS_BILL_URL: ${CBMS_BILL_URL:-https://cbapi.ird.gov.np/api/bill}
+      CBMS_RETURN_URL: ${CBMS_RETURN_URL:-https://cbapi.ird.gov.np/api/billreturn}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: false
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET:-nivas}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:?set MINIO_PUBLIC_URL}
+      MINIO_ORPHAN_MIN_AGE_DAYS: ${MINIO_ORPHAN_MIN_AGE_DAYS:-7}
+      MINIO_BACKUP_BUCKET: ${MINIO_BACKUP_BUCKET:-nivas-backups}
+      BACKUP_KEEP: ${BACKUP_KEEP:-3}
+      BACKUP_TIMEOUT_MS: ${BACKUP_TIMEOUT_MS:-300000}
+      DEFAULT_SMTP_HOST: ${DEFAULT_SMTP_HOST:-}
+      DEFAULT_SMTP_PORT: ${DEFAULT_SMTP_PORT:-587}
+      DEFAULT_SMTP_USER: ${DEFAULT_SMTP_USER:-}
+      DEFAULT_SMTP_PASSWORD: ${DEFAULT_SMTP_PASSWORD:-}
+      DEFAULT_SMTP_FROM_EMAIL: ${DEFAULT_SMTP_FROM_EMAIL:-}
+      DEFAULT_SMTP_FROM_NAME: ${DEFAULT_SMTP_FROM_NAME:-Nivas PMS}
+      DEFAULT_SMS_PROVIDER: ${DEFAULT_SMS_PROVIDER:-}
+      DEFAULT_SMS_API_KEY: ${DEFAULT_SMS_API_KEY:-}
+      DEFAULT_SMS_API_SECRET: ${DEFAULT_SMS_API_SECRET:-}
+      DEFAULT_SMS_SENDER_ID: ${DEFAULT_SMS_SENDER_ID:-}
+      MOBILE_ANALYTICS_ENABLED: ${MOBILE_ANALYTICS_ENABLED:-false}
+      MOBILE_ANALYTICS_RETENTION_DAYS: ${MOBILE_ANALYTICS_RETENTION_DAYS:-30}
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    volumes:
+      - uploads_data:/usr/src/app/services/backend/public/uploads
+    networks:
+      - nivas-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+
+volumes:
+  postgres_data:
+  uploads_data:
+  redis_data:
+  minio_data:
+
+networks:
+  nivas-net:
+    driver: bridge
